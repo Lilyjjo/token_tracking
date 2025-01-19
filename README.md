@@ -21,7 +21,7 @@ createdb my_example_database
 # check that the database is created 
 psql -l
 ```
-3. Setup the database schema with diesel and configure the tables
+3. Setup the database schema with diesel and configure the tables. This will create the necessary schema file at `src/pool_sql/schema.rs`.
 ```bash
 diesel migration run
 ```
