@@ -3,18 +3,6 @@ use alloy::sol;
 sol! {
     #[derive(Debug, PartialEq, Eq)]
     #[sol(rpc, abi)]
-    interface IERC20Minimal {
-        /// @notice Event emitted when tokens are transferred from one address to another, either via `#transfer` or `#transferFrom`.
-        /// @param from The account from which the tokens were sent, i.e. the balance decreased
-        /// @param to The account to which the tokens were sent, i.e. the balance increased
-        /// @param value The amount of tokens that were transferred
-        event Transfer(address indexed from, address indexed to, uint256 value);
-    }
-}
-
-sol! {
-    #[derive(Debug, PartialEq, Eq)]
-    #[sol(rpc, abi)]
     interface UniswapV3Pool {
         /// @notice Emitted exactly once by a pool when #initialize is first called on the pool
         /// @dev Mint/Burn/Swap cannot be emitted by the pool before Initialize

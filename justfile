@@ -21,10 +21,11 @@ clippy:
 # Default log level
 log_level := "info"
 
-live level=log_level:
-  RUST_LOG={{level}} cargo run live
+single_block block_number level=log_level:
+  RUST_LOG={{level}} cargo run single-block --block-number {{ block_number }}
 
-single block_number level=log_level:
-  RUST_LOG={{level}} cargo run single --block-number {{ block_number }}
+blocks_from start_block end_block level=log_level:
+  RUST_LOG={{level}} cargo run blocks-from --start-block {{ start_block }} --end-block {{ end_block }}
 
-
+live_blocks level=log_level:
+  RUST_LOG={{level}} cargo run live-blocks
