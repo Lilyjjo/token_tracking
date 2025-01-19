@@ -2,6 +2,13 @@
 
 This is a tool to grab all event data from target Uniswap V3 pools and store it in a Postgres database for later analysis. The code pulls data from an RPC node on a block basis and then stores it in a SQL format in the database. You can see the schema in the `/migrations/uniswap_pool_events/up.sql` file.
 
+The tracked pools are those that are created by the pool deployer contracts specified in the `.env` file. (E.g. the example .env lists the Clanker token deployer contracts as the pool deployers, so all pools created by these contracts will be tracked.)
+
+To use this tool to collect data for all Clanker deployed pools, you can run the following command, where the first param is the first block that Clankerv0 deployed a token/pool on Base:
+```bash
+just blocks_from 22964317 MOST_RECENT_BLOCK_NUMBER
+```
+
 ## Requirements
 This tool uses [diesel](https://github.com/diesel-rs/diesel) to interact with a postgres database. These are the instructions I used to install postgres and diesel on my mac.
 ```

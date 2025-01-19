@@ -11,6 +11,17 @@ CREATE TABLE transactions (
     transaction_sender BYTEA NOT NULL   -- Address
 );
 
+CREATE TABLE pool_create_events (
+    transaction_hash BYTEA NOT NULL REFERENCES transactions(transaction_hash),
+    log_index BIGINT NOT NULL,
+    token0 BYTEA NOT NULL,
+    token1 BYTEA NOT NULL,
+    fee NUMERIC(78, 0) NOT NULL,
+    tick_spacing NUMERIC(78, 0) NOT NULL,
+    pool BYTEA NOT NULL,
+    PRIMARY KEY(transaction_hash, log_index)
+);
+
 CREATE TABLE swap_events (
     transaction_hash BYTEA NOT NULL REFERENCES transactions(transaction_hash),
     log_index BIGINT NOT NULL,           -- u64
@@ -80,7 +91,7 @@ CREATE INDEX swap_events_contract_address_idx ON swap_events(contract_address);
 CREATE INDEX mint_events_contract_address_idx ON mint_events(contract_address);
 CREATE INDEX burn_events_contract_address_idx ON burn_events(contract_address);
 CREATE INDEX collect_events_contract_address_idx ON collect_events(contract_address);
-
+CREATE INDEX pool_create_events_contract_address_idx ON pool_create_events(pool);
 -- transaction and blocks
 CREATE INDEX transactions_block_number_idx ON transactions(block_number);
 CREATE INDEX blocks_timestamp_idx ON blocks(block_timestamp);

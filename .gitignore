@@ -1,3 +1,4 @@
 /target
 .env
 src/pool_sql/schema.rs
+.DS_Store

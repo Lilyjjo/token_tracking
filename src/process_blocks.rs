@@ -26,10 +26,7 @@ use alloy::{
     },
     sol_types::SolEvent,
 };
-use diesel::{
-    Connection,
-    PgConnection,
-};
+use diesel::PgConnection;
 use eyre::{
     bail,
     Result,
@@ -49,15 +46,22 @@ use UniswapV3Pool::{
 };
 
 use crate::{
-    abi::UniswapV3Pool,
+    abi::{
+        IUniswapV3Factory::PoolCreated,
+        UniswapV3Pool,
+    },
     pool_sql::{
-        database_interactions::insert_block_events,
+        database_interactions::{
+            establish_connection,
+            insert_block_events,
+        },
         types::{
             Block,
             BurnEvent,
             CollectEvent,
             InitializationEvent,
             MintEvent,
+            PoolCreateEvent,
             SwapEvent,
             Transaction,
         },
@@ -73,7 +77,9 @@ use crate::{
 pub(crate) async fn single_block(
     http_url: String,
     block_number: u64,
-    pools: &HashSet<Address>,
+    uniswap_v3_factory_address: Address,
+    pool_deployer_addresses: &HashSet<Address>,
+    pools: &mut HashSet<Address>,
     retry_config: RetryConfig,
 ) -> Result<()> {
     let client = http_connection(http_url)
@@ -97,7 +103,15 @@ pub(crate) async fn single_block(
         };
 
     // process block for desired events
-    match get_and_store_events(&pools, receipts, block).await {
+    match get_and_store_events(
+        pool_deployer_addresses,
+        pools,
+        uniswap_v3_factory_address,
+        receipts,
+        block,
+    )
+    .await
+    {
         Ok(_) => {}
         Err(e) => {
             bail!(
@@ -115,7 +129,9 @@ pub(crate) async fn blocks_from(
     http_url: String,
     start_block: u64,
     end_block: u64,
-    pools: &HashSet<Address>,
+    uniswap_v3_factory_address: Address,
+    pool_deployer_addresses: &HashSet<Address>,
+    pools: &mut HashSet<Address>,
     retry_config: RetryConfig,
     delay_ms: u64,
 ) -> Result<()> {
@@ -152,7 +168,15 @@ pub(crate) async fn blocks_from(
             };
 
         // process block for desired events
-        match get_and_store_events(pools, receipts, block).await {
+        match get_and_store_events(
+            pool_deployer_addresses,
+            pools,
+            uniswap_v3_factory_address,
+            receipts,
+            block,
+        )
+        .await
+        {
             Ok(_) => {}
             Err(e) => {
                 bail!(
@@ -176,7 +200,9 @@ pub(crate) async fn blocks_from(
 pub(crate) async fn live_blocks(
     http_url: String,
     wss_url: String,
-    pools: &HashSet<Address>,
+    uniswap_v3_factory_address: Address,
+    pool_deployer_addresses: &HashSet<Address>,
+    pools: &mut HashSet<Address>,
     retry_config: RetryConfig,
 ) -> Result<()> {
     let client = http_connection(http_url)
@@ -213,7 +239,15 @@ pub(crate) async fn live_blocks(
             };
 
         // process block for desired events
-        match get_and_store_events(pools, receipts, block).await {
+        match get_and_store_events(
+            pool_deployer_addresses,
+            pools,
+            uniswap_v3_factory_address,
+            receipts,
+            block,
+        )
+        .await
+        {
             Ok(_) => {}
             Err(e) => {
                 bail!(
@@ -230,7 +264,9 @@ pub(crate) async fn live_blocks(
 
 // TODO: refactor this to be more modular
 async fn get_and_store_events(
-    pools: &HashSet<Address>,
+    pool_deployer_addresses: &HashSet<Address>,
+    pools: &mut HashSet<Address>,
+    uniswap_v3_factory_address: Address,
     block_receipts: Vec<WithOtherFields<TransactionReceipt<AnyReceiptEnvelope<Log>>>>,
     block: <AnyNetwork as Network>::BlockResponse,
 ) -> Result<()> {
@@ -240,19 +276,16 @@ async fn get_and_store_events(
         .filter(
             |receipt: &WithOtherFields<TransactionReceipt<AnyReceiptEnvelope<Log>>>| {
                 // Check if any logs are from our target contract
-                receipt
-                    .inner
-                    .inner
-                    .inner
-                    .logs()
-                    .iter()
-                    .any(|log| pools.contains(&log.address()))
+                receipt.inner.inner.inner.logs().iter().any(|log| {
+                    pools.contains(&log.address()) || log.address() == uniswap_v3_factory_address
+                })
             },
         )
         .collect();
 
     let block = Block::new(block.inner.header.number, block.inner.header.timestamp);
     let mut transactions = HashMap::<TxHash, Transaction>::new();
+    let mut pool_create_events = Vec::<PoolCreateEvent>::new();
     let mut swaps = Vec::<SwapEvent>::new();
     let mut initialize_events = Vec::<InitializationEvent>::new();
     let mut mint_events = Vec::<MintEvent>::new();
@@ -266,7 +299,8 @@ async fn get_and_store_events(
                     && log.inner.topics()[0] != Mint::SIGNATURE_HASH
                     && log.inner.topics()[0] != Burn::SIGNATURE_HASH
                     && log.inner.topics()[0] != Collect::SIGNATURE_HASH
-                    && log.inner.topics()[0] != Initialize::SIGNATURE_HASH)
+                    && log.inner.topics()[0] != Initialize::SIGNATURE_HASH
+                    && log.inner.topics()[0] != PoolCreated::SIGNATURE_HASH)
             {
                 continue;
             }
@@ -278,6 +312,47 @@ async fn get_and_store_events(
                 log.data().data.clone(),
             ) {
                 match log.inner.topics()[0] {
+                    PoolCreated::SIGNATURE_HASH => {
+                        if let Ok(pool_create_event) = PoolCreated::decode_log(&abi_log, true) {
+                            if log.address() != uniswap_v3_factory_address {
+                                // event not from target factory
+                                continue;
+                            }
+                            if let Some(pool_address) = tx.inner.to {
+                                if !pool_deployer_addresses.contains(&pool_address) {
+                                    // pool not from target deployers
+                                    continue;
+                                }
+                            } else {
+                                // pool not from target deployers
+                                continue;
+                            }
+
+                            // build transaction data struct if not already in map
+                            transactions.entry(tx.inner.transaction_hash).or_insert({
+                                let transaction_data = Transaction::new(tx.inner.from, log.clone());
+                                if let Ok(transaction_data) = transaction_data {
+                                    transaction_data
+                                } else {
+                                    bail!("Failed to create transaction data from: {:?}", log);
+                                }
+                            });
+
+                            debug!("pool_create_event: {:?}", pool_create_event);
+                            let pool_create_event =
+                                PoolCreateEvent::new(log.clone(), pool_create_event);
+
+                            if let Ok(pool_create_event) = pool_create_event {
+                                // track pool in pools set
+                                pools.insert(pool_create_event.pool);
+
+                                // add to pool create events
+                                pool_create_events.push(pool_create_event);
+                            } else {
+                                bail!("Failed to create pool create event from: {:?}", log);
+                            }
+                        }
+                    }
                     Initialize::SIGNATURE_HASH => {
                         if let Ok(initialize_event) = Initialize::decode_log(&abi_log, true) {
                             if !pools.contains(&log.address()) {
@@ -287,8 +362,7 @@ async fn get_and_store_events(
 
                             // build transaction data struct if not already in map
                             transactions.entry(tx.inner.transaction_hash).or_insert({
-                                let transaction_data =
-                                    Transaction::new(log.inner.address, log.clone());
+                                let transaction_data = Transaction::new(tx.inner.from, log.clone());
                                 if let Ok(transaction_data) = transaction_data {
                                     transaction_data
                                 } else {
@@ -317,8 +391,7 @@ async fn get_and_store_events(
                             debug!("swap_event: {:?}", swap_event);
                             // build transaction data struct if not already in map
                             transactions.entry(tx.inner.transaction_hash).or_insert({
-                                let transaction_data =
-                                    Transaction::new(log.inner.address, log.clone());
+                                let transaction_data = Transaction::new(tx.inner.from, log.clone());
                                 if let Ok(transaction_data) = transaction_data {
                                     transaction_data
                                 } else {
@@ -344,8 +417,7 @@ async fn get_and_store_events(
 
                             // build transaction data struct if not already in map
                             transactions.entry(tx.inner.transaction_hash).or_insert({
-                                let transaction_data =
-                                    Transaction::new(log.inner.address, log.clone());
+                                let transaction_data = Transaction::new(tx.inner.from, log.clone());
                                 if let Ok(transaction_data) = transaction_data {
                                     transaction_data
                                 } else {
@@ -370,8 +442,7 @@ async fn get_and_store_events(
                             debug!("burn_event: {:?}", burn_event);
                             // build transaction data struct if not already in map
                             transactions.entry(tx.inner.transaction_hash).or_insert({
-                                let transaction_data =
-                                    Transaction::new(log.inner.address, log.clone());
+                                let transaction_data = Transaction::new(tx.inner.from, log.clone());
                                 if let Ok(transaction_data) = transaction_data {
                                     transaction_data
                                 } else {
@@ -397,8 +468,7 @@ async fn get_and_store_events(
 
                             // build transaction data struct if not already in map
                             transactions.entry(tx.inner.transaction_hash).or_insert({
-                                let transaction_data =
-                                    Transaction::new(log.inner.address, log.clone());
+                                let transaction_data = Transaction::new(tx.inner.from, log.clone());
                                 if let Ok(transaction_data) = transaction_data {
                                     transaction_data
                                 } else {
@@ -420,7 +490,7 @@ async fn get_and_store_events(
             }
         }
     }
-    let mut db_connection = establish_connection();
+    let mut db_connection = establish_connection()?;
 
     // insert events into db if swaps exist
     if !swaps.is_empty()
@@ -430,9 +500,10 @@ async fn get_and_store_events(
         || !collect_events.is_empty()
     {
         info!(
-            "Found in block {}:\n  swaps: {}\n  mint_events: {}\n  burn_events: {}\n  \
-             collect_events: {}\n  initialize_events: {}",
+            "Found in block {}:\n  pool_create_events: {}\n  swaps: {}\n  mint_events: {}\n  \
+             burn_events: {}\n  collect_events: {}\n  initialize_events: {}",
             block.block_number,
+            pool_create_events.len(),
             swaps.len(),
             mint_events.len(),
             burn_events.len(),
@@ -442,6 +513,7 @@ async fn get_and_store_events(
         let result = put_events_into_db(
             block,
             transactions,
+            pool_create_events,
             swaps,
             initialize_events,
             mint_events,
@@ -462,15 +534,10 @@ async fn get_and_store_events(
     Ok(())
 }
 
-fn establish_connection() -> PgConnection {
-    dotenv::dotenv().ok();
-    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
-    PgConnection::establish(&database_url).expect("Error connecting to test database")
-}
-
 fn put_events_into_db(
     block: Block,
     transactions: HashMap<TxHash, Transaction>,
+    pool_create_events: Vec<PoolCreateEvent>,
     swap_events: Vec<SwapEvent>,
     initialize_events: Vec<InitializationEvent>,
     mint_events: Vec<MintEvent>,
@@ -480,6 +547,10 @@ fn put_events_into_db(
 ) -> Result<()> {
     // convert swapevents to swapeventraw
     let block_raw = block.try_into().unwrap();
+    let pool_create_events_raw = pool_create_events
+        .into_iter()
+        .map(|pool_create_event| pool_create_event.try_into().unwrap())
+        .collect();
     let swap_events_raw = swap_events
         .into_iter()
         .map(|swap_event| swap_event.try_into().unwrap())
@@ -507,6 +578,7 @@ fn put_events_into_db(
     insert_block_events(
         block_raw,
         transactions_raw,
+        pool_create_events_raw,
         swap_events_raw,
         initialize_events_raw,
         mint_events_raw,

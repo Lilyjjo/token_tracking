@@ -10,6 +10,7 @@ use alloy::{
             I256,
             U128,
             U160,
+            U24,
             U256,
         },
         Address,
@@ -29,12 +30,15 @@ use eyre::{
 };
 
 use crate::{
-    abi::UniswapV3Pool::{
-        Burn,
-        Collect,
-        Initialize,
-        Mint,
-        Swap,
+    abi::{
+        IUniswapV3Factory::PoolCreated,
+        UniswapV3Pool::{
+            Burn,
+            Collect,
+            Initialize,
+            Mint,
+            Swap,
+        },
     },
     pool_sql::schema::*,
 };
@@ -135,6 +139,63 @@ impl TryFrom<Transaction> for TransactionRaw {
             block_number: tx.block_number as i64,
             transaction_index: tx.transaction_index as i64,
             transaction_sender: tx.transaction_sender.to_vec(),
+        })
+    }
+}
+
+#[derive(Debug, Queryable, Selectable, Insertable)]
+#[diesel(table_name = pool_create_events)]
+#[diesel(check_for_backend(diesel::pg::Pg))]
+#[derive(Clone)]
+pub(crate) struct PoolCreateEventRaw {
+    pub transaction_hash: Vec<u8>,
+    pub log_index: i64,
+    pub token0: Vec<u8>,
+    pub token1: Vec<u8>,
+    pub fee: BigDecimal,
+    pub tick_spacing: BigDecimal,
+    pub pool: Vec<u8>,
+}
+
+#[derive(Debug)]
+pub(crate) struct PoolCreateEvent {
+    pub transaction_hash: TxHash,
+    pub log_index: u64,
+    pub token0: Address,
+    pub token1: Address,
+    pub fee: U24,
+    pub tick_spacing: I24,
+    pub pool: Address,
+}
+
+impl TryFrom<PoolCreateEventRaw> for PoolCreateEvent {
+    type Error = Box<dyn std::error::Error>;
+
+    fn try_from(raw: PoolCreateEventRaw) -> Result<Self, Self::Error> {
+        Ok(Self {
+            transaction_hash: TxHash::try_from(raw.transaction_hash.as_slice())?,
+            log_index: raw.log_index as u64,
+            token0: Address::try_from(raw.token0.as_slice())?,
+            token1: Address::try_from(raw.token1.as_slice())?,
+            fee: U24::from_str(&raw.fee.to_string())?,
+            tick_spacing: I24::from_str(&raw.tick_spacing.to_string())?,
+            pool: Address::try_from(raw.pool.as_slice())?,
+        })
+    }
+}
+
+impl TryFrom<PoolCreateEvent> for PoolCreateEventRaw {
+    type Error = Box<dyn std::error::Error>;
+
+    fn try_from(event: PoolCreateEvent) -> Result<Self, Self::Error> {
+        Ok(Self {
+            transaction_hash: event.transaction_hash.to_vec(),
+            log_index: event.log_index as i64,
+            token0: event.token0.to_vec(),
+            token1: event.token1.to_vec(),
+            fee: BigDecimal::from_str(&event.fee.to_string())?,
+            tick_spacing: BigDecimal::from_str(&event.tick_spacing.to_string())?,
+            pool: event.pool.to_vec(),
         })
     }
 }
@@ -540,6 +601,22 @@ impl Transaction {
                 .transaction_index
                 .wrap_err("transaction_index is missing")?,
             transaction_sender: sender,
+        })
+    }
+}
+
+impl PoolCreateEvent {
+    pub(crate) fn new(log: Log, pool_create_event: AbiLog<PoolCreated>) -> Result<Self> {
+        Ok(Self {
+            transaction_hash: log
+                .transaction_hash
+                .wrap_err("transaction_hash is missing")?,
+            log_index: log.log_index.wrap_err("log_index is missing")?,
+            token0: pool_create_event.token0,
+            token1: pool_create_event.token1,
+            fee: pool_create_event.fee,
+            tick_spacing: pool_create_event.tickSpacing,
+            pool: pool_create_event.pool,
         })
     }
 }

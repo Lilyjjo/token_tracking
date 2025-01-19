@@ -1,9 +1,14 @@
+use alloy::primitives::Address;
 use diesel::{
     pg::PgConnection,
     prelude::*,
     result::Error,
 };
 use eyre::Result;
+use tracing::{
+    debug,
+    info,
+};
 
 use crate::pool_sql::types::*;
 
@@ -53,6 +58,38 @@ impl TransactionRaw {
             .execute(conn)?;
 
         Ok(self)
+    }
+}
+
+impl PoolCreateEventRaw {
+    pub fn find_by_tx_and_log(
+        tx_hash: &[u8],
+        log_idx: i64,
+        conn: &mut PgConnection,
+    ) -> Result<Option<Self>, Error> {
+        use crate::pool_sql::schema::pool_create_events::dsl::*;
+
+        pool_create_events
+            .filter(transaction_hash.eq(tx_hash))
+            .filter(log_index.eq(log_idx))
+            .first(conn)
+            .optional()
+    }
+
+    pub fn insert_if_not_exists(self, conn: &mut PgConnection) -> Result<(), Error> {
+        use crate::pool_sql::schema::pool_create_events::dsl::*;
+
+        // Check if pool create event already exists
+        if let Some(_) = Self::find_by_tx_and_log(&self.transaction_hash, self.log_index, conn)? {
+            return Ok(());
+        }
+
+        // Insert if it doesn't exist
+        diesel::insert_into(pool_create_events)
+            .values(self)
+            .execute(conn)?;
+
+        Ok(())
     }
 }
 
@@ -212,10 +249,27 @@ impl CollectEventRaw {
     }
 }
 
+pub(crate) fn find_all_tracked_pools(conn: &mut PgConnection) -> Result<Vec<Address>, Error> {
+    use crate::pool_sql::schema::pool_create_events::dsl::*;
+
+    let pool_addresses_raw: Vec<Vec<u8>> = pool_create_events.select(pool).distinct().load(conn)?;
+
+    let pool_addresses: Vec<Address> = pool_addresses_raw
+        .into_iter()
+        .map(|address| Address::from_slice(&address))
+        .collect();
+
+    info!("Found {} tracked pools", pool_addresses.len());
+    debug!("Pool addresses: {:?}", pool_addresses);
+
+    Ok(pool_addresses)
+}
+
 // Function to insert a transaction and multiple swap events
 pub(crate) fn insert_block_events(
     block: BlockRaw,
     transactions: Vec<TransactionRaw>,
+    pool_create_events: Vec<PoolCreateEventRaw>,
     swaps: Vec<SwapEventRaw>,
     initialize_events: Vec<InitializationEventRaw>,
     mint_events: Vec<MintEventRaw>,
@@ -229,6 +283,11 @@ pub(crate) fn insert_block_events(
         // First ensure the transactions exist
         for transaction in transactions {
             transaction.insert_if_not_exists(conn)?;
+        }
+
+        // Then insert all pool create events
+        for pool_create in pool_create_events {
+            pool_create.insert_if_not_exists(conn)?;
         }
 
         // Then insert all swap events
@@ -258,4 +317,10 @@ pub(crate) fn insert_block_events(
 
         Ok(())
     })
+}
+
+pub(crate) fn establish_connection() -> Result<PgConnection> {
+    dotenv::dotenv().ok();
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for tests");
+    Ok(PgConnection::establish(&database_url)?)
 }

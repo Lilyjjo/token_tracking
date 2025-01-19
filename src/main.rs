@@ -7,7 +7,10 @@ use eyre::{
     Result,
     WrapErr,
 };
-use tracing::error;
+use tracing::{
+    error,
+    info,
+};
 use tracing_subscriber::{
     fmt::format::FmtSpan,
     EnvFilter,
@@ -66,13 +69,6 @@ async fn main() -> Result<()> {
     tracing::subscriber::set_global_default(subscriber)
         .context("Failed to set tracing subscriber")?;
 
-    // Figure out better way to initialize which pools to track
-    let pools = std::env::var("POOLS").expect("POOLS is required");
-    let pools: HashSet<Address> = pools
-        .split(',')
-        .map(|p| Address::from_str(p).expect("pool address error"))
-        .collect();
-
     let retry_config = rpc::RetryConfig::new(
         std::env::var("RETRY_MAX_ATTEMPTS")
             .expect("RETRY_MAX_ATTEMPTS is required")
@@ -92,6 +88,21 @@ async fn main() -> Result<()> {
             .expect("RETRY_BACKOFF_MULTIPLIER must be a number"),
     );
 
+    let pool_deployer_addresses = std::env::var("POOL_DEPLOYER_CONTRACT_ADDRESSES")
+        .expect("POOL_DEPLOYER_CONTRACT_ADDRESSES is required");
+    let pool_deployer_addresses: HashSet<Address> = pool_deployer_addresses
+        .split(',')
+        .map(|p| Address::from_str(p).expect("pool address error"))
+        .collect();
+
+    info!("Pool deployer addresses: {:?}", pool_deployer_addresses);
+
+    let uniswap_v3_factory_address = std::env::var("UNISWAP_V3_FACTORY_ADDRESS")
+        .expect("UNISWAP_V3_FACTORY_ADDRESS is required");
+    let uniswap_v3_factory_address: Address = uniswap_v3_factory_address
+        .parse()
+        .expect("UNISWAP_V3_FACTORY_ADDRESS must be a valid address");
+
     // Set token and pool addresses above
     let http_url = std::env::var("HTTP_URL").expect("HTTP_URL is required");
     let wss_url = std::env::var("WSS_URL").expect("WSS_URL is required");
@@ -102,12 +113,28 @@ async fn main() -> Result<()> {
     // Parse command line arguments
     let cli = Cli::parse();
 
+    // Get all pools already being tracked in the database
+    let mut conn = pool_sql::database_interactions::establish_connection()?;
+    let mut pools: HashSet<Address> =
+        pool_sql::database_interactions::find_all_tracked_pools(&mut conn)?
+            .into_iter()
+            .collect();
+
     match cli.mode {
         Mode::SingleBlock => {
             let block_number = cli
                 .block_number
                 .expect("Block number is required for single mode");
-            match process_blocks::single_block(http_url, block_number, &pools, retry_config).await {
+            match process_blocks::single_block(
+                http_url,
+                block_number,
+                uniswap_v3_factory_address,
+                &pool_deployer_addresses,
+                &mut pools,
+                retry_config,
+            )
+            .await
+            {
                 Ok(_) => {}
                 Err(e) => {
                     error!("Block processing error {}", e);
@@ -125,7 +152,9 @@ async fn main() -> Result<()> {
                 http_url,
                 start_block,
                 end_block,
-                &pools,
+                uniswap_v3_factory_address,
+                &pool_deployer_addresses,
+                &mut pools,
                 retry_config,
                 delay_ms,
             )
@@ -138,7 +167,16 @@ async fn main() -> Result<()> {
             }
         }
         Mode::LiveTrack => {
-            match process_blocks::live_blocks(http_url, wss_url, &pools, retry_config).await {
+            match process_blocks::live_blocks(
+                http_url,
+                wss_url,
+                uniswap_v3_factory_address,
+                &pool_deployer_addresses,
+                &mut pools,
+                retry_config,
+            )
+            .await
+            {
                 Ok(_) => {}
                 Err(e) => {
                     error!("Block processing error {}", e);

@@ -3,6 +3,26 @@ use alloy::sol;
 sol! {
     #[derive(Debug, PartialEq, Eq)]
     #[sol(rpc, abi)]
+    interface IUniswapV3Factory {
+        /// @notice Emitted when a pool is created
+        /// @param token0 The first token of the pool by address sort order
+        /// @param token1 The second token of the pool by address sort order
+        /// @param fee The fee collected upon every swap in the pool, denominated in hundredths of a bip
+        /// @param tickSpacing The minimum number of ticks between initialized ticks
+        /// @param pool The address of the created pool
+        event PoolCreated(
+            address indexed token0,
+            address indexed token1,
+            uint24 indexed fee,
+            int24 tickSpacing,
+            address pool
+        );
+    }
+}
+
+sol! {
+    #[derive(Debug, PartialEq, Eq)]
+    #[sol(rpc, abi)]
     interface UniswapV3Pool {
         /// @notice Emitted exactly once by a pool when #initialize is first called on the pool
         /// @dev Mint/Burn/Swap cannot be emitted by the pool before Initialize
