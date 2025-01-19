@@ -1,6 +1,6 @@
 # Uniswap V3 Pool Data Grabber 
 
-This is a tool to grab all event data from target Uniswap V3 pools and store it in a Postgres database for later analysis. The code pulls data from an RPC node on a block basis and then stores it in a SQL format in the database. You can see the schema in the `src/schema.rs` file.
+This is a tool to grab all event data from target Uniswap V3 pools and store it in a Postgres database for later analysis. The code pulls data from an RPC node on a block basis and then stores it in a SQL format in the database. You can see the schema in the `/migrations/uniswap_pool_events/up.sql` file.
 
 ## Requirements
 This tool uses [diesel](https://github.com/diesel-rs/diesel) to interact with a postgres database. These are the instructions I used to install postgres and diesel on my mac.
